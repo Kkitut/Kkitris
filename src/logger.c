@@ -36,16 +36,6 @@ static FILE *log_file;
 static thrd_t log_thread;
 static bool log_running;
 
-static bool make_path(
-    char *buffer,
-    size_t buffer_size,
-    const char *base_path,
-    const char *name
-) {
-    int len = snprintf(buffer, buffer_size, "%s/%s", base_path, name);
-    return len >= 0 && (size_t)len < buffer_size;
-}
-
 static int log_thread_func(void *arg) {
     (void)arg;
 
@@ -142,84 +132,62 @@ static void log_enqueue(LogLevel level, const char *format, va_list args) {
 bool logger_init(void) {
     if (mtx_init(&log_mutex, mtx_plain) != thrd_success) {
         printlnf("[F] Failed to initialize log mutex");
-
         return false;
     }
 
     if (cnd_init(&log_condition) != thrd_success) {
         printlnf("[F] Failed to initialize log condition");
         mtx_destroy(&log_mutex);
+        return false;
+    }
 
+    char path[PATH_MAX];
+
+    if (!Ktr_get_executable_directory(path, sizeof(path))) {
+        cnd_destroy(&log_condition);
+        mtx_destroy(&log_mutex);
         return false;
     }
 
     struct stat st;
-    char path[PATH_MAX];
-
-    ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-
-    if (len == -1) {
-        printlnf("[F] Failed to get current program path: %s", strerror(errno));
-
-        return false;
-    }
-
-    path[len] = '\0';
-
-    char *last_slash = strrchr(path, '/');
-
-    if (last_slash != NULL) {
-        *last_slash = '\0';
-    }
-
     char log_folder_path[PATH_MAX];
     char log_file_path[PATH_MAX];
     char log_file_old_path[PATH_MAX];
 
-    if (!make_path(
-            log_folder_path,
-            sizeof(log_folder_path),
-            path,
-            LOGS_FOLDER_NAME)) {
+    if (!Ktr_make_path(log_folder_path, sizeof(log_folder_path), path, LOGS_FOLDER_NAME)) {
         printlnf("[F] Log folder path is too long");
-
+        cnd_destroy(&log_condition);
+        mtx_destroy(&log_mutex);
         return false;
     }
 
-    if (!make_path(
-            log_file_path,
-            sizeof(log_file_path),
-            log_folder_path,
-            LOG_FILE_NAME)) {
+    if (!Ktr_make_path(log_file_path, sizeof(log_file_path), log_folder_path, LOG_FILE_NAME)) {
         printlnf("[F] Log file path is too long");
-
+        cnd_destroy(&log_condition);
+        mtx_destroy(&log_mutex);
         return false;
     }
 
-    if (!make_path(
-            log_file_old_path,
-            sizeof(log_file_old_path),
-            log_folder_path,
-            LOG_FILE_NAME_OLD)) {
+    if (!Ktr_make_path(log_file_old_path, sizeof(log_file_old_path), log_folder_path, LOG_FILE_NAME_OLD)) {
         printlnf("[F] Old log file path is too long");
-
+        cnd_destroy(&log_condition);
+        mtx_destroy(&log_mutex);
         return false;
     }
 
     if (stat(log_folder_path, &st) != 0) {
         printlnf("[I] \"logs\" folder does not exist, creating...");
 
-        if (mkdir(
-                log_folder_path,
-                S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH
-            ) != 0) {
+        if (mkdir(log_folder_path, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) != 0) {
             printlnf("[F] Failed to create logs folder: %s", strerror(errno));
-
+            cnd_destroy(&log_condition);
+            mtx_destroy(&log_mutex);
             return false;
         }
     } else if (!S_ISDIR(st.st_mode)) {
         printlnf("[F] \"logs\" exists but is not a directory");
-
+        cnd_destroy(&log_condition);
+        mtx_destroy(&log_mutex);
         return false;
     }
 
@@ -233,7 +201,8 @@ bool logger_init(void) {
 
     if (log_file == NULL) {
         printlnf("[F] Failed to create log file: %s", strerror(errno));
-
+        cnd_destroy(&log_condition);
+        mtx_destroy(&log_mutex);
         return false;
     }
 
