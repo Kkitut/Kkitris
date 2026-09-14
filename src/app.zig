@@ -13,6 +13,14 @@ fn glfwErrorDescription() []const u8 {
     return "(no description)";
 }
 
+fn platformOverride() ?c_int {
+    const raw = std.c.getenv("KKITRIS_PLATFORM") orelse return null;
+    const value = std.mem.span(raw);
+    if (std.ascii.eqlIgnoreCase(value, "x11")) return c.GLFW_PLATFORM_X11;
+    if (std.ascii.eqlIgnoreCase(value, "wayland")) return c.GLFW_PLATFORM_WAYLAND;
+    return null;
+}
+
 fn keyCallback(
     window: ?*c.GLFWwindow,
     key: c_int,
@@ -29,6 +37,11 @@ fn keyCallback(
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
     logger.info("Starting...", .{});
+
+    if (platformOverride()) |p| {
+        c.glfwInitHint(c.GLFW_PLATFORM, p);
+        logger.info("GLFW platform override: {d}", .{p});
+    }
 
     if (c.glfwInit() == 0) {
         logger.fail("Failed to initialize GLFW: {s}", .{glfwErrorDescription()});
