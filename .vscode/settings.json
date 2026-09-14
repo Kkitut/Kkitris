@@ -1,4 +1,4 @@
 {
-    "C_Cpp.default.cStandard": "c23",
-    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"
+    "zig.path": "/home/kkitut/devs/zig-x86_64-linux-0.16.0/zig",
+    "zig.zls.path": "/home/kkitut/devs/zls-x86_64-linux/zls"
 }

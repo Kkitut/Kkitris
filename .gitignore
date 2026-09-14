@@ -1,2 +1,4 @@
 /build
 /.history
+/zig-out
+/.zig-cache
