@@ -242,6 +242,31 @@ pub const Engine = struct {
     }
 
     pub fn render(self: *Engine) void {
+        var fbw: c_int = 0;
+        var fbh: c_int = 0;
+        c.glfwGetFramebufferSize(self.window.?, &fbw, &fbh);
+
+        if (fbw <= 0 or fbh <= 0 or
+            c.glfwGetWindowAttrib(self.window.?, c.GLFW_ICONIFIED) != 0)
+        {
+            const ts = std.c.timespec{ .sec = 0, .nsec = 16 * 1000 * 1000 };
+            _ = std.c.nanosleep(&ts, null);
+            return;
+        }
+
+        const width: u32 = @intCast(fbw);
+        const height: u32 = @intCast(fbh);
+
+        if (self.swapchain == null or
+            width != self.swapchain_extent.width or
+            height != self.swapchain_extent.height or
+            self.framebuffer_resized)
+        {
+            self.framebuffer_resized = false;
+            self.recreateSwapchain(width, height) catch return;
+            if (self.swapchain == null) return;
+        }
+
         const frame = self.current_frame;
 
         var result = c.vkWaitForFences(
@@ -260,12 +285,14 @@ pub const Engine = struct {
         result = c.vkAcquireNextImageKHR(
             self.device,
             self.swapchain,
-            std.math.maxInt(u64),
+            std.time.ns_per_s,
             self.image_available_semaphores[frame],
             null,
             &image_index,
         );
+        if (result == c.VK_TIMEOUT) return;
         if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_ERROR_SURFACE_LOST_KHR) {
+            self.framebuffer_resized = true;
             return;
         }
         if (result != c.VK_SUCCESS and result != c.VK_SUBOPTIMAL_KHR) {
@@ -986,8 +1013,7 @@ pub const Engine = struct {
         var extent: c.VkExtent2D = undefined;
         if (capabilities.currentExtent.width != std.math.maxInt(u32)) {
             extent = capabilities.currentExtent;
-        } else {
-            extent.width = @min(
+        } else {            extent.width = @min(
                 @max(width, capabilities.minImageExtent.width),
                 capabilities.maxImageExtent.width,
             );
@@ -1019,7 +1045,7 @@ pub const Engine = struct {
             .pQueueFamilyIndices = null,
             .preTransform = capabilities.currentTransform,
             .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-            .presentMode = c.VK_PRESENT_MODE_FIFO_KHR,
+            .presentMode = try self.choosePresentMode(),
             .clipped = c.VK_TRUE,
             .oldSwapchain = self.swapchain,
         };
@@ -1113,6 +1139,101 @@ pub const Engine = struct {
         self.swapchain_framebuffers = framebuffers;
 
         try self.createGraphicsPipeline();
+    }
+
+    fn recreateSwapchain(self: *Engine, width: u32, height: u32) !void {
+        const idle = c.vkDeviceWaitIdle(self.device);
+        if (idle != c.VK_SUCCESS) {
+            logger.fail("Failed to wait for device idle: {d}", .{idle});
+            return error.SwapchainFailed;
+        }
+
+        for (self.swapchain_framebuffers) |fb| {
+            if (fb != null) c.vkDestroyFramebuffer(self.device, fb, null);
+        }
+        if (self.swapchain_framebuffers.len > 0) {
+            self.allocator.free(self.swapchain_framebuffers);
+            self.swapchain_framebuffers = &.{};
+        }
+
+        for (self.swapchain_image_views) |view| {
+            if (view != null) c.vkDestroyImageView(self.device, view, null);
+        }
+        if (self.swapchain_image_views.len > 0) {
+            self.allocator.free(self.swapchain_image_views);
+            self.swapchain_image_views = &.{};
+        }
+
+        if (self.swapchain_images.len > 0) {
+            self.allocator.free(self.swapchain_images);
+            self.swapchain_images = &.{};
+        }
+
+        if (self.graphics_pipeline != null) {
+            c.vkDestroyPipeline(self.device, self.graphics_pipeline, null);
+            self.graphics_pipeline = null;
+        }
+
+        if (self.pipeline_layout != null) {
+            c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
+            self.pipeline_layout = null;
+        }
+
+        if (self.command_buffers.len > 0) {
+            c.vkFreeCommandBuffers(
+                self.device,
+                self.command_pool,
+                @intCast(self.command_buffers.len),
+                self.command_buffers.ptr,
+            );
+            self.allocator.free(self.command_buffers);
+            self.command_buffers = &.{};
+        }
+
+        if (self.swapchain != null) {
+            c.vkDestroySwapchainKHR(self.device, self.swapchain, null);
+            self.swapchain = null;
+        }
+
+        try self.createSwapchainResources(width, height);
+        try self.createCommandBuffers();
+    }
+
+    fn choosePresentMode(self: *Engine) !c.VkPresentModeKHR {
+        var count: u32 = 0;
+        var result = c.vkGetPhysicalDeviceSurfacePresentModesKHR(
+            self.physical_device,
+            self.surface,
+            &count,
+            null,
+        );
+        if (result != c.VK_SUCCESS or count == 0) {
+            logger.fail("Failed to get surface present modes: {d}", .{result});
+            return error.SurfaceFormatFailed;
+        }
+
+        const modes = self.allocator.alloc(c.VkPresentModeKHR, count) catch
+            return error.OutOfMemory;
+        defer self.allocator.free(modes);
+
+        result = c.vkGetPhysicalDeviceSurfacePresentModesKHR(
+            self.physical_device,
+            self.surface,
+            &count,
+            modes.ptr,
+        );
+        if (result != c.VK_SUCCESS) {
+            logger.fail("Failed to get surface present modes: {d}", .{result});
+            return error.SurfaceFormatFailed;
+        }
+
+        // Mailbox never blocks the caller waiting for vsync, unlike FIFO.
+        // That matters when the window is hidden: a FIFO present can stall
+        // forever instead of failing fast.
+        for (modes[0..@min(count, modes.len)]) |mode| {
+            if (mode == c.VK_PRESENT_MODE_MAILBOX_KHR) return mode;
+        }
+        return c.VK_PRESENT_MODE_FIFO_KHR;
     }
 
     fn chooseSurfaceFormat(self: *Engine) !void {

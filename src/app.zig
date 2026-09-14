@@ -64,6 +64,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
     };
     defer c.glfwDestroyWindow(window);
 
+    c.glfwSetWindowSizeLimits(window, 320, 180, c.GLFW_DONT_CARE, c.GLFW_DONT_CARE);
+
     _ = c.glfwSetKeyCallback(window, keyCallback);
 
     var engine: Engine = undefined;
