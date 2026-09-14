@@ -47,7 +47,93 @@ pub const Engine = struct {
 
         try self.createInstance();
         try self.createSurface();
-        try self.pickPhysicalDevice();
+        try self.pickAndInitDevice();
+    }
+
+    /// Pick GPUs in score order and bring up the first one that works end to
+    /// end. A GPU can report surface support yet fail later (e.g. an NVIDIA
+    /// dGPU that cannot present to a Wayland compositor running on the iGPU),
+    /// so fall through to the next candidate instead of giving up.
+    fn pickAndInitDevice(self: *Engine) !void {
+        var device_count: u32 = 0;
+        var result = c.vkEnumeratePhysicalDevices(self.instance, &device_count, null);
+        if (result != c.VK_SUCCESS or device_count == 0) {
+            logger.fail("Failed to find GPUs with Vulkan support: {d}", .{result});
+            return error.NoSuitableGpu;
+        }
+
+        const devices = self.allocator.alloc(c.VkPhysicalDevice, device_count) catch
+            return error.OutOfMemory;
+        defer self.allocator.free(devices);
+
+        result = c.vkEnumeratePhysicalDevices(self.instance, &device_count, devices.ptr);
+        if (result != c.VK_SUCCESS) {
+            logger.fail("Failed to enumerate GPUs: {d}", .{result});
+            return error.NoSuitableGpu;
+        }
+
+        const scores = self.allocator.alloc(u32, devices.len) catch return error.OutOfMemory;
+        defer self.allocator.free(scores);
+
+        const tried = self.allocator.alloc(bool, devices.len) catch return error.OutOfMemory;
+        defer self.allocator.free(tried);
+        @memset(tried, false);
+
+        for (devices, 0..) |dev, i| {
+            var properties: c.VkPhysicalDeviceProperties = undefined;
+            c.vkGetPhysicalDeviceProperties(dev, &properties);
+
+            const name_len =
+                std.mem.indexOfScalar(u8, &properties.deviceName, 0) orelse
+                properties.deviceName.len;
+
+            scores[i] = self.rateDeviceSuitability(dev);
+            logger.info("Vulkan GPU {d}: {s} (Type: {d}, Score: {d})", .{
+                i,
+                properties.deviceName[0..name_len],
+                properties.deviceType,
+                scores[i],
+            });
+        }
+
+        var last_err: anyerror = error.NoSuitableGpu;
+        while (true) {
+            var best: ?usize = null;
+            for (scores, 0..) |score, i| {
+                if (!tried[i] and score > 0 and (best == null or score > scores[best.?])) {
+                    best = i;
+                }
+            }
+            const bi = best orelse break;
+            tried[bi] = true;
+
+            self.physical_device = devices[bi];
+            self.queue_family_index = self.findQueueFamily(devices[bi]);
+
+            self.initDevice() catch |err| {
+                logger.warn("GPU {d} failed to initialize, trying next", .{bi});
+                last_err = err;
+                self.deinitDevice();
+                continue;
+            };
+
+            var properties: c.VkPhysicalDeviceProperties = undefined;
+            c.vkGetPhysicalDeviceProperties(self.physical_device, &properties);
+            const name_len =
+                std.mem.indexOfScalar(u8, &properties.deviceName, 0) orelse
+                properties.deviceName.len;
+            logger.info("Selected Vulkan GPU: {s} (Score: {d})", .{
+                properties.deviceName[0..name_len],
+                scores[bi],
+            });
+            return;
+        }
+
+        logger.fail("No suitable GPU found with Graphics and Surface support", .{});
+        return last_err;
+    }
+
+    fn initDevice(self: *Engine) !void {
         try self.createLogicalDevice();
         try self.chooseSurfaceFormat();
         try self.createRenderPass();
@@ -213,6 +299,22 @@ pub const Engine = struct {
     }
 
     pub fn deinit(self: *Engine) void {
+        self.deinitDevice();
+
+        if (self.surface != null and self.instance != null) {
+            c.vkDestroySurfaceKHR(self.instance, self.surface, null);
+            self.surface = null;
+        }
+
+        if (self.instance != null) {
+            c.vkDestroyInstance(self.instance, null);
+            self.instance = null;
+        }
+
+        self.window = null;
+    }
+
+    fn deinitDevice(self: *Engine) void {
         if (self.device != null) {
             _ = c.vkDeviceWaitIdle(self.device);
 
@@ -290,18 +392,6 @@ pub const Engine = struct {
             c.vkDestroyDevice(self.device, null);
             self.device = null;
         }
-
-        if (self.surface != null and self.instance != null) {
-            c.vkDestroySurfaceKHR(self.instance, self.surface, null);
-            self.surface = null;
-        }
-
-        if (self.instance != null) {
-            c.vkDestroyInstance(self.instance, null);
-            self.instance = null;
-        }
-
-        self.window = null;
     }
 
     fn readSpv(self: *Engine, path: []const u8) ![]u32 {
@@ -484,70 +574,6 @@ pub const Engine = struct {
         return score;
     }
 
-    fn pickPhysicalDevice(self: *Engine) !void {
-        var device_count: u32 = 0;
-        var result = c.vkEnumeratePhysicalDevices(self.instance, &device_count, null);
-        if (result != c.VK_SUCCESS or device_count == 0) {
-            logger.fail("Failed to find GPUs with Vulkan support: {d}", .{result});
-            return error.NoSuitableGpu;
-        }
-
-        const devices = self.allocator.alloc(c.VkPhysicalDevice, device_count) catch
-            return error.OutOfMemory;
-        defer self.allocator.free(devices);
-
-        result = c.vkEnumeratePhysicalDevices(self.instance, &device_count, devices.ptr);
-        if (result != c.VK_SUCCESS) {
-            logger.fail("Failed to enumerate GPUs: {d}", .{result});
-            return error.NoSuitableGpu;
-        }
-
-        var best_device: c.VkPhysicalDevice = null;
-        var highest_score: u32 = 0;
-        var best_queue_family: u32 = std.math.maxInt(u32);
-        var best_name: [256]u8 = [_]u8{0} ** 256;
-        var best_name_len: usize = 0;
-
-        for (devices, 0..) |dev, i| {
-            var properties: c.VkPhysicalDeviceProperties = undefined;
-            c.vkGetPhysicalDeviceProperties(dev, &properties);
-
-            const name_len =
-                std.mem.indexOfScalar(u8, &properties.deviceName, 0) orelse
-                properties.deviceName.len;
-            const name = properties.deviceName[0..name_len];
-
-            const score = self.rateDeviceSuitability(dev);
-            logger.info("Vulkan GPU {d}: {s} (Type: {d}, Score: {d})", .{
-                i,
-                name,
-                properties.deviceType,
-                score,
-            });
-
-            if (score > highest_score) {
-                highest_score = score;
-                best_device = dev;
-                best_queue_family = self.findQueueFamily(dev);
-                best_name_len = @min(name.len, best_name.len - 1);
-                @memcpy(best_name[0..best_name_len], name[0..best_name_len]);
-            }
-        }
-
-        if (best_device == null) {
-            logger.fail("No suitable GPU found with Graphics and Surface support", .{});
-            return error.NoSuitableGpu;
-        }
-
-        self.physical_device = best_device;
-        self.queue_family_index = best_queue_family;
-
-        logger.info("Selected Vulkan GPU: {s} (Score: {d})", .{
-            best_name[0..best_name_len],
-            highest_score,
-        });
-    }
-
     fn createLogicalDevice(self: *Engine) !void {
         var queue_priority: f32 = 1.0;
         const queue_info = c.VkDeviceQueueCreateInfo{
@@ -661,14 +687,20 @@ pub const Engine = struct {
             },
         };
 
+        // Must match `PushConstants` in object.vert (mat4 = 64 bytes).
+        const push_range = c.VkPushConstantRange{
+            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
+            .offset = 0,
+            .size = 64,
+        };
         const layout_info = c.VkPipelineLayoutCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .setLayoutCount = 0,
-            .pSetLayouts = null,
-            .pushConstantRangeCount = 0,
-            .pPushConstantRanges = null,
+            .setLayoutCount = 1,
+            .pSetLayouts = &self.descriptor_set_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &push_range,
         };
         var result = c.vkCreatePipelineLayout(self.device, &layout_info, null, &self.pipeline_layout);
         if (result != c.VK_SUCCESS) {
