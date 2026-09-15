@@ -1,39 +1,34 @@
 # Kkitris
 
-Zig + Vulkan + GLFW Tetris clone.
+puzzle game, you know how it is. (DEFINITELY NOT T*tris)
 
-## Prerequisites
+## need
 
-- Zig 0.16.0
-- zls 0.16.0 (optional, for editor support)
-- `glslc` (shader compiler, e.g. `shaderc` package)
-- Vulkan SDK / drivers (`libvulkan-dev`)
-- GLFW (`libglfw3-dev`)
+- zig 0.16.0
+- nagac or tint (shaders)
+- libvulkan-dev, libglfw3-dev
 
 ```sh
-sudo apt install libglfw3-dev libvulkan-dev shaderc
+cp local.json.example local.json
 ```
 
-## Build & Run
+## run
 
 ```sh
-zig build        # builds zig-out/bin/Kkitris + shaders
-zig build run    # build and run
-zig build test   # unit tests
+zig build run
+zig build test
 ```
 
-Shaders in `src/shader/` are compiled with `glslc` into
-`zig-out/bin/shader/*.spv` next to the executable, where the engine loads
-them at runtime. Logs go to `<exe-dir>/logs/latest.log`.
+shaders in `src/shader/` get compiled to `zig-out/bin/shader/*.spv`.
+no compiler set up? build will yell at you. logs in `<exe-dir>/logs/latest.log`.
 
-## Notes
+## notes
 
-- GPUs are tried in score order; if one fails to initialize (e.g. an NVIDIA
-  dGPU that cannot present to a Wayland compositor running on the iGPU),
-  the next one is tried automatically.
-- `KKITRIS_PLATFORM=x11|wayland` forces the GLFW backend
-  (default: GLFW auto-detect). On hybrid-GPU Wayland setups, `x11` allows
-  using the NVIDIA dGPU via XWayland:
+- gpus are tried best-first. ****ing nvidia on wayland usually pretends to work
+  and then doesnt, so it just moves on. if wayland is being wayland:
+- `KKITRIS_PLATFORM=x11|wayland` forces the glfw backend (default: whatever
+  glfw feels like). on hybrid-gpu wayland, `x11` lets you use the nvidia gpu
+  via xwayland:
 
 ```sh
 KKITRIS_PLATFORM=x11 zig build run

@@ -16,7 +16,6 @@ const Buffer = struct {
     memory: c.VkDeviceMemory,
 };
 
-/// Per-instance data for the test quad. Layout must match object.vert.
 const InstanceData = extern struct {
     color: [4]f32,
     position: [2]f32,
@@ -74,10 +73,6 @@ pub const Engine = struct {
         try self.pickAndInitDevice();
     }
 
-    /// Pick GPUs in score order and bring up the first one that works end to
-    /// end. A GPU can report surface support yet fail later (e.g. an NVIDIA
-    /// dGPU that cannot present to a Wayland compositor running on the iGPU),
-    /// so fall through to the next candidate instead of giving up.
     fn pickAndInitDevice(self: *Engine) !void {
         var device_count: u32 = 0;
         var result = c.vkEnumeratePhysicalDevices(self.instance, &device_count, null);
@@ -820,7 +815,7 @@ pub const Engine = struct {
                 .flags = 0,
                 .stage = c.VK_SHADER_STAGE_VERTEX_BIT,
                 .module = mods.vert,
-                .pName = "main",
+                .pName = "vs_main",
                 .pSpecializationInfo = null,
             },
             .{
@@ -829,12 +824,11 @@ pub const Engine = struct {
                 .flags = 0,
                 .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT,
                 .module = mods.frag,
-                .pName = "main",
+                .pName = "fs_main",
                 .pSpecializationInfo = null,
             },
         };
 
-        // Must match `PushConstants` in object.vert (mat4 = 64 bytes).
         const push_range = c.VkPushConstantRange{
             .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
             .offset = 0,
@@ -1013,7 +1007,8 @@ pub const Engine = struct {
         var extent: c.VkExtent2D = undefined;
         if (capabilities.currentExtent.width != std.math.maxInt(u32)) {
             extent = capabilities.currentExtent;
-        } else {            extent.width = @min(
+        } else {
+            extent.width = @min(
                 @max(width, capabilities.minImageExtent.width),
                 capabilities.maxImageExtent.width,
             );
@@ -1064,7 +1059,10 @@ pub const Engine = struct {
 
         const images = self.allocator.alloc(c.VkImage, actual_count) catch
             return error.OutOfMemory;
-        errdefer self.allocator.free(images);
+        errdefer {
+            self.allocator.free(images);
+            self.swapchain_images = &.{};
+        }
 
         result = c.vkGetSwapchainImagesKHR(self.device, self.swapchain, &actual_count, images.ptr);
         if (result != c.VK_SUCCESS) {
@@ -1075,7 +1073,10 @@ pub const Engine = struct {
 
         const views = self.allocator.alloc(c.VkImageView, self.swapchain_images.len) catch
             return error.OutOfMemory;
-        errdefer self.allocator.free(views);
+        errdefer {
+            self.allocator.free(views);
+            self.swapchain_image_views = &.{};
+        }
 
         for (self.swapchain_images, 0..) |image, i| {
             const view_info = c.VkImageViewCreateInfo{
@@ -1112,7 +1113,10 @@ pub const Engine = struct {
 
         const framebuffers = self.allocator.alloc(c.VkFramebuffer, self.swapchain_images.len) catch
             return error.OutOfMemory;
-        errdefer self.allocator.free(framebuffers);
+        errdefer {
+            self.allocator.free(framebuffers);
+            self.swapchain_framebuffers = &.{};
+        }
 
         for (self.swapchain_image_views, 0..) |view, i| {
             const attachments = [_]c.VkImageView{view};
@@ -1227,9 +1231,6 @@ pub const Engine = struct {
             return error.SurfaceFormatFailed;
         }
 
-        // Mailbox never blocks the caller waiting for vsync, unlike FIFO.
-        // That matters when the window is hidden: a FIFO present can stall
-        // forever instead of failing fast.
         for (modes[0..@min(count, modes.len)]) |mode| {
             if (mode == c.VK_PRESENT_MODE_MAILBOX_KHR) return mode;
         }
@@ -1424,28 +1425,39 @@ pub const Engine = struct {
     }
 
     fn createDescriptorLayout(self: *Engine) !void {
-        var binding_flags: u32 =
+        var binding_flags = [_]u32{
             c.VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-            c.VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+                c.VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+            c.VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+        };
         var binding_flags_info = c.VkDescriptorSetLayoutBindingFlagsCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
             .pNext = null,
-            .bindingCount = 1,
+            .bindingCount = 2,
             .pBindingFlags = &binding_flags,
         };
-        const binding = c.VkDescriptorSetLayoutBinding{
-            .binding = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 4096,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-            .pImmutableSamplers = null,
+        const bindings = [_]c.VkDescriptorSetLayoutBinding{
+            .{
+                .binding = 0,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                .descriptorCount = 4096,
+                .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+                .pImmutableSamplers = null,
+            },
+            .{
+                .binding = 1,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+                .pImmutableSamplers = null,
+            },
         };
         const layout_info = c.VkDescriptorSetLayoutCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = &binding_flags_info,
             .flags = c.VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
-            .bindingCount = 1,
-            .pBindings = &binding,
+            .bindingCount = 2,
+            .pBindings = &bindings,
         };
 
         const result = c.vkCreateDescriptorSetLayout(
@@ -1827,17 +1839,17 @@ pub const Engine = struct {
         }
         self.test_sampler = sampler;
 
-        const pool_size = c.VkDescriptorPoolSize{
-            .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 4096,
+        const pool_sizes = [_]c.VkDescriptorPoolSize{
+            .{ .type = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 4096 },
+            .{ .type = c.VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1 },
         };
         const pool_info = c.VkDescriptorPoolCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = null,
             .flags = c.VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
             .maxSets = 1,
-            .poolSizeCount = 1,
-            .pPoolSizes = &pool_size,
+            .poolSizeCount = 2,
+            .pPoolSizes = &pool_sizes,
         };
         var pool: c.VkDescriptorPool = null;
         result = c.vkCreateDescriptorPool(self.device, &pool_info, null, &pool);
@@ -1864,22 +1876,41 @@ pub const Engine = struct {
         self.descriptor_set = set;
 
         const img_desc = c.VkDescriptorImageInfo{
-            .sampler = sampler,
+            .sampler = null,
             .imageView = view,
             .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
-        const write = c.VkWriteDescriptorSet{
-            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .pNext = null,
-            .dstSet = set,
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &img_desc,
-            .pBufferInfo = null,
-            .pTexelBufferView = null,
+        const sampler_desc = c.VkDescriptorImageInfo{
+            .sampler = sampler,
+            .imageView = null,
+            .imageLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
         };
-        c.vkUpdateDescriptorSets(self.device, 1, &write, 0, null);
+        const writes = [_]c.VkWriteDescriptorSet{
+            .{
+                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = null,
+                .dstSet = set,
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                .pImageInfo = &img_desc,
+                .pBufferInfo = null,
+                .pTexelBufferView = null,
+            },
+            .{
+                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = null,
+                .dstSet = set,
+                .dstBinding = 1,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLER,
+                .pImageInfo = &sampler_desc,
+                .pBufferInfo = null,
+                .pTexelBufferView = null,
+            },
+        };
+        c.vkUpdateDescriptorSets(self.device, 2, &writes, 0, null);
     }
 };
