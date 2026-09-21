@@ -17,11 +17,13 @@ const freecam_mod = @import("render/freecam.zig");
 
 const app_name = "Kkitris";
 
-const Screen = enum { menu, play };
+const Screen = enum { menu, settings, play };
 
 const AppState = struct {
     screen: Screen = .menu,
     menu_selected: usize = 0,
+    settings_selected: usize = 0,
+    cfg: RulesConfig = .{},
     game: Game = undefined,
     has_game: bool = false,
     held: Buttons = .{},
@@ -36,6 +38,7 @@ const AppState = struct {
     time: f32 = 0,
     seed_counter: u64 = 0,
     allocator: std.mem.Allocator = undefined,
+    io: std.Io = undefined,
 };
 
 fn glfwErrorDescription() []const u8 {
@@ -71,14 +74,13 @@ fn startPlay(st: *AppState) void {
     }
     const dims = MenuSize.tall.dims();
     const seed = nextSeed(st);
-    const cfg = RulesConfig{
-        .w = dims.w,
-        .h = dims.h,
-        .visible_h = dims.visible,
-        .seed = seed,
-        .preview_count = 5,
-        .endless = true,
-    };
+    var cfg = st.cfg;
+    cfg.w = dims.w;
+    cfg.h = dims.h;
+    cfg.visible_h = dims.visible;
+    cfg.seed = seed;
+    cfg.preview_count = 5;
+    cfg.endless = true;
     st.game = Game.init(st.allocator, cfg) catch return;
     st.has_game = true;
     st.held = .{};
@@ -165,6 +167,20 @@ fn cursorCallback(
     st.freecam.applyMouse(xpos, ypos);
 }
 
+fn adjustSetting(st: *AppState, dir: i32) void {
+    const d: f32 = @floatFromInt(dir);
+    switch (st.settings_selected) {
+        0 => st.cfg.das_sec = @min(@max(st.cfg.das_sec + d * 0.005, 0), 0.5),
+        1 => st.cfg.arr_sec = @min(@max(st.cfg.arr_sec + d * 0.001, 0), 0.2),
+        2 => st.cfg.dcd_sec = @min(@max(st.cfg.dcd_sec + d * 0.001, 0), 0.1),
+        3 => st.cfg.sdf = @min(@max(st.cfg.sdf + d * 1.0, 1.0), 41.0),
+        else => return,
+    }
+    config_mod.save(st.io, st.allocator, config_mod.SETTINGS_PATH, st.cfg) catch {
+        logger.fail("Settings save failed", .{});
+    };
+}
+
 fn keyCallback(
     window: ?*c.GLFWwindow,
     key: c_int,
@@ -216,14 +232,31 @@ fn keyCallback(
             if (!pressed) return;
             switch (key) {
                 c.GLFW_KEY_ESCAPE => if (window) |w| c.glfwSetWindowShouldClose(w, 1),
-                c.GLFW_KEY_UP => st.menu_selected = 0,
-                c.GLFW_KEY_DOWN => st.menu_selected = 1,
+                c.GLFW_KEY_UP => st.menu_selected = if (st.menu_selected == 0) 2 else st.menu_selected - 1,
+                c.GLFW_KEY_DOWN => st.menu_selected = if (st.menu_selected >= 2) 0 else st.menu_selected + 1,
                 c.GLFW_KEY_ENTER, c.GLFW_KEY_KP_ENTER, c.GLFW_KEY_SPACE => {
-                    if (st.menu_selected == 1) {
+                    if (st.menu_selected == 2) {
                         if (window) |w| c.glfwSetWindowShouldClose(w, 1);
+                    } else if (st.menu_selected == 1) {
+                        st.settings_selected = 0;
+                        st.screen = .settings;
                     } else {
                         startPlay(st);
                     }
+                },
+                else => {},
+            }
+        },
+        .settings => {
+            if (!pressed) return;
+            switch (key) {
+                c.GLFW_KEY_ESCAPE => st.screen = .menu,
+                c.GLFW_KEY_UP => st.settings_selected = if (st.settings_selected == 0) 4 else st.settings_selected - 1,
+                c.GLFW_KEY_DOWN => st.settings_selected = if (st.settings_selected >= 4) 0 else st.settings_selected + 1,
+                c.GLFW_KEY_LEFT => adjustSetting(st, -1),
+                c.GLFW_KEY_RIGHT => adjustSetting(st, 1),
+                c.GLFW_KEY_ENTER, c.GLFW_KEY_KP_ENTER, c.GLFW_KEY_SPACE => {
+                    if (st.settings_selected == 4) st.screen = .menu;
                 },
                 else => {},
             }
@@ -358,7 +391,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
 
     c.glfwSetWindowSizeLimits(window, 320, 180, c.GLFW_DONT_CARE, c.GLFW_DONT_CARE);
 
-    var state = AppState{ .allocator = allocator };
+    var state = AppState{ .allocator = allocator, .io = io };
+    if (config_mod.load(io, allocator, config_mod.SETTINGS_PATH) catch |err| blk: {
+        logger.fail("Settings load failed, using defaults: {s}", .{@errorName(err)});
+        break :blk null;
+    }) |cfg| {
+        state.cfg = cfg;
+    }
     c.glfwSetWindowUserPointer(window, &state);
     _ = c.glfwSetKeyCallback(window, keyCallback);
     _ = c.glfwSetCursorPosCallback(window, cursorCallback);
@@ -395,6 +434,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
             .menu => blk: {
                 engine.setOrtho(fw, fh);
                 break :blk board_view.renderMenu(&quads, fw, fh, state.menu_selected, state.time);
+            },
+            .settings => blk: {
+                engine.setOrtho(fw, fh);
+                break :blk board_view.renderSettings(&quads, fw, fh, state.cfg, state.settings_selected);
             },
             .play => blk: {
                 if (!state.has_game) {

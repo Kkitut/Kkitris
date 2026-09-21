@@ -6,6 +6,7 @@ const push = inst_mod.push;
 const font = @import("../ui/font.zig");
 const game_mod = @import("../core/game.zig");
 const Game = game_mod.Game;
+const config_mod = @import("../core/config.zig");
 const piece_mod = @import("../core/piece.zig");
 const PieceKind = piece_mod.PieceKind;
 
@@ -56,7 +57,53 @@ fn centeredTextUp(list: []InstanceData, count: *usize, str: []const u8, cx: f32,
 }
 
 
-pub const MENU_ITEMS = [_][]const u8{ "START", "QUIT" };
+pub const MENU_ITEMS = [_][]const u8{ "START", "SETTINGS", "QUIT" };
+
+pub fn renderSettings(
+    list: []InstanceData,
+    fbw: f32,
+    fbh: f32,
+    cfg: config_mod.RulesConfig,
+    selected: usize,
+) usize {
+    var n: usize = 0;
+    rect(list, &n, fbw * 0.5, fbh * 0.5, fbw, fbh, .{ 0.04, 0.045, 0.06, 1 }, Skin.white);
+
+    const body_px: f32 = @max(3.0, fbw / 260.0);
+    const cx = fbw * 0.5;
+    centeredText(list, &n, "SETTINGS", cx, fbh * 0.5 - body_px * 22.0, body_px * 1.6, WHITE);
+
+    var val_bufs: [4][16]u8 = undefined;
+    const sdf_str = if (cfg.sdf > 40.0) "SDF INF" else std.fmt.bufPrint(&val_bufs[3], "SDF {d}X", .{@as(u32, @intFromFloat(cfg.sdf + 0.5))}) catch "SDF";
+    const vals = [_][]const u8{
+        std.fmt.bufPrint(&val_bufs[0], "DAS {d}MS", .{@as(u32, @intFromFloat(cfg.das_sec * 1000.0 + 0.5))}) catch "DAS",
+        std.fmt.bufPrint(&val_bufs[1], "ARR {d}MS", .{@as(u32, @intFromFloat(cfg.arr_sec * 1000.0 + 0.5))}) catch "ARR",
+        std.fmt.bufPrint(&val_bufs[2], "DCD {d}MS", .{@as(u32, @intFromFloat(cfg.dcd_sec * 1000.0 + 0.5))}) catch "DCD",
+        sdf_str,
+    };
+    var y = fbh * 0.5 - body_px * 8.0;
+    for (vals, 0..) |row, i| {
+        const sel = selected == i;
+        var line: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&line, "{s} {s} {s}", .{
+            if (sel) ">" else " ",
+            row,
+            if (sel) "<" else " ",
+        }) catch row;
+        centeredText(list, &n, s, cx, y, body_px * 1.4, if (sel) WHITE else DIM);
+        y += body_px * 8.0;
+    }
+    centeredText(
+        list,
+        &n,
+        if (selected == 4) "> BACK <" else "  BACK  ",
+        cx,
+        y,
+        body_px * 1.4,
+        if (selected == 4) WHITE else DIM,
+    );
+    return n;
+}
 
 pub fn renderMenu(
     list: []InstanceData,
@@ -294,6 +341,11 @@ pub fn renderPlay(list: []InstanceData, game: *const Game, time_sec: f32) usize 
         font.drawTextUp(list, &n, s, hold_cx - panel_w * 0.5, ty, label_px, if (game.b2b) ACCENT else DIM);
         ty -= label_px * 6.0;
     }
+    {
+        const s = std.fmt.bufPrint(&numbuf, "SURGE {d}", .{game.surge}) catch "SURGE";
+        font.drawTextUp(list, &n, s, hold_cx - panel_w * 0.5, ty, label_px, if (game.surge >= 4) ACCENT else DIM);
+        ty -= label_px * 6.0;
+    }
     if (game.cfg.endless and game.resets > 0) {
         const s = std.fmt.bufPrint(&numbuf, "RESET {d}", .{game.resets}) catch "RESET";
         font.drawTextUp(list, &n, s, hold_cx - panel_w * 0.5, ty, label_px, DIM);
@@ -309,6 +361,15 @@ test "renderplay" {
     var buf: [4096]InstanceData = undefined;
     const n = renderPlay(&buf, &game, 0);
     try std.testing.expect(n >= 4);
+    for (buf[0..n]) |q| {
+        for (q.position) |v| try std.testing.expect(std.math.isFinite(v));
+    }
+}
+
+test "rendersettings" {
+    var buf: [4096]InstanceData = undefined;
+    const n = renderSettings(&buf, 1600, 900, .{}, 2);
+    try std.testing.expect(n > 6);
     for (buf[0..n]) |q| {
         for (q.position) |v| try std.testing.expect(std.math.isFinite(v));
     }

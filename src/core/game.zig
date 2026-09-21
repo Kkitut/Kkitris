@@ -34,8 +34,8 @@ pub const Action = enum {
 pub const GameEvent = union(enum) {
     spawn: PieceKind,
     lock: struct { kind: PieceKind, cells: u32 },
-    clear: struct { lines: u32, attack: u32, combo: i32, b2b: bool },
-    tspin: struct { lines: u32, kick: u8 },
+    clear: struct { lines: u32, attack: u32, combo: i32, b2b: bool, surge: u32, surge_damage: u32 },
+    spin: struct { kind: PieceKind, lines: u32, kick: u8 },
     hold: PieceKind,
     level_up: u32,
     over,
@@ -68,12 +68,14 @@ pub const Game = struct {
     das_timer: f32 = 0,
     arr_acc: f32 = 0,
     das_dir: i32 = 0,
+    dcd_timer: f32 = 0,
 
     score: u64 = 0,
     level: u32 = 1,
     lines_total: u32 = 0,
     combo: i32 = -1,
     b2b: bool = false,
+    surge: u32 = 0,
     pieces: u64 = 0,
     attack_pending: u32 = 0,
     resets: u32 = 0,
@@ -114,11 +116,13 @@ pub const Game = struct {
         self.das_timer = 0;
         self.arr_acc = 0;
         self.das_dir = 0;
+        self.dcd_timer = 0;
         self.score = 0;
         self.level = self.cfg.start_level;
         self.lines_total = 0;
         self.combo = -1;
         self.b2b = false;
+        self.surge = 0;
         self.pieces = 0;
         self.attack_pending = 0;
         self.is_over = false;
@@ -306,7 +310,10 @@ pub const Game = struct {
         const step = @min(dt, 0.25);
 
         const want_dir: i32 = if (held.left and !held.right) -1 else if (held.right and !held.left) 1 else 0;
-        if (want_dir == 0) {
+        if (self.dcd_timer > 0) {
+            // DAS cut delay: no auto-shift charging right after a lock.
+            self.dcd_timer -= step;
+        } else if (want_dir == 0) {
             self.das_dir = 0;
             self.das_timer = 0;
             self.arr_acc = 0;
@@ -319,11 +326,21 @@ pub const Game = struct {
             } else {
                 self.das_timer += step;
                 if (self.das_timer >= self.cfg.das_sec) {
-                    self.arr_acc += step;
-                    while (self.arr_acc >= self.cfg.arr_sec) {
-                        self.arr_acc -= self.cfg.arr_sec;
-                        if (want_dir < 0) self.doAction(.move_left) else self.doAction(.move_right);
-                        if (self.is_over or !self.has_active) return;
+                    if (self.cfg.arr_sec <= 0) {
+                        // Instant ARR: teleport to the wall (bounded).
+                        var guard: u32 = 0;
+                        while (guard < self.cfg.w) : (guard += 1) {
+                            const px = self.active.x;
+                            if (want_dir < 0) self.doAction(.move_left) else self.doAction(.move_right);
+                            if (self.active.x == px) break;
+                        }
+                    } else {
+                        self.arr_acc += step;
+                        while (self.arr_acc >= self.cfg.arr_sec) {
+                            self.arr_acc -= self.cfg.arr_sec;
+                            if (want_dir < 0) self.doAction(.move_left) else self.doAction(.move_right);
+                            if (self.is_over or !self.has_active) return;
+                        }
                     }
                 }
             }
@@ -335,16 +352,26 @@ pub const Game = struct {
         }
 
         var interval = RulesConfig.gravityInterval(self.level);
-        if (held.soft) interval /= self.cfg.soft_factor;
-        self.fall_acc += step;
-        while (self.fall_acc >= interval) {
-            self.fall_acc -= interval;
-            if (!self.field.collides(self.activeMasks(), self.active.x, self.active.y - 1)) {
-                self.active.y -= 1;
+        if (held.soft and self.cfg.sdf > 40.0) {
+            // Infinite soft drop: slam to the ghost position without locking.
+            const gy = self.ghostY();
+            if (gy < self.active.y) {
+                self.score += @as(u64, @intCast(self.active.y - gy));
+                self.active.y = gy;
                 self.last_was_rotate = false;
-                if (held.soft) self.score += 1;
-            } else {
-                break;
+            }
+        } else {
+            if (held.soft) interval /= self.cfg.sdf;
+            self.fall_acc += step;
+            while (self.fall_acc >= interval) {
+                self.fall_acc -= interval;
+                if (!self.field.collides(self.activeMasks(), self.active.x, self.active.y - 1)) {
+                    self.active.y -= 1;
+                    self.last_was_rotate = false;
+                    if (held.soft) self.score += 1;
+                } else {
+                    break;
+                }
             }
         }
 
@@ -356,10 +383,10 @@ pub const Game = struct {
         }
     }
 
-    fn isTspin(self: *const Game) bool {
-        if (!self.last_was_rotate or self.active.kind != .t) return false;
-        if (self.last_kick == 0) {
-        }
+    fn isSpin(self: *const Game) bool {
+        // All spins are mini. O never spins; every other piece uses the
+        // 3-corner rule around (x+1, y+1), same center as guideline T-spins.
+        if (!self.last_was_rotate or self.active.kind == .o) return false;
         const cx = self.active.x + 1;
         const cy = self.active.y + 1;
         var corners: u32 = 0;
@@ -380,9 +407,14 @@ pub const Game = struct {
 
     fn lockNow(self: *Game) void {
         if (!self.has_active) return;
+        // DAS cut on lock (+ recharge delay).
+        self.das_dir = 0;
+        self.das_timer = 0;
+        self.arr_acc = 0;
+        self.dcd_timer = self.cfg.dcd_sec;
         const kind = self.active.kind;
         const masks = self.activeMasks();
-        const tspin = self.isTspin();
+        const spin = self.isSpin();
         const res = self.field.lock(masks, self.active.x, self.active.y, .normal, kind.mino());
         self.pushEvent(.{ .lock = .{ .kind = kind, .cells = res.cells_written } });
         self.pieces += 1;
@@ -400,25 +432,38 @@ pub const Game = struct {
             self.combo += 1;
             const lv: f32 = @floatFromInt(self.level);
             var gained: u64 = 0;
-            if (tspin) {
-                const base: [5]u64 = .{ 400, 800, 1200, 1600, 2000 };
+            if (spin) {
+                // Mini spin scoring (all spins are mini).
+                const base: [5]u64 = .{ 100, 200, 400, 800, 800 };
                 gained = base[@min(n, 4)] * @as(u64, @intFromFloat(lv));
-                self.pushEvent(.{ .tspin = .{ .lines = n, .kick = self.last_kick } });
+                self.pushEvent(.{ .spin = .{ .kind = kind, .lines = n, .kick = self.last_kick } });
             } else {
                 const base: [5]u64 = .{ 0, 100, 300, 500, 800 };
                 gained = base[@min(n, 4)] * @as(u64, @intFromFloat(lv));
             }
-            const is_b2b_event = (n == 4 or tspin);
-            if (is_b2b_event and self.b2b) gained = gained * 3 / 2;
+            const is_difficult = (n == 4 or spin);
+            const was_b2b = self.b2b;
+            if (is_difficult and was_b2b) gained = gained * 3 / 2;
             if (self.combo > 0) gained += @as(u64, @intCast(self.combo)) * 50 * @as(u64, @intFromFloat(lv));
             self.score += gained;
 
             const atk_table: [5]u32 = .{ 0, 0, 1, 2, 4 };
             var atk = atk_table[@min(n, 4)];
-            if (is_b2b_event and self.b2b) atk += 1;
-            if (tspin) atk += @min(n, 4);
+            if (was_b2b) atk += 1;
+            var surge_damage: u32 = 0;
+            if (is_difficult) {
+                self.surge += 1;
+                self.b2b = true;
+            } else if (was_b2b) {
+                // B2B breaks: discharge surge if active (>= 4).
+                if (self.surge >= 4) {
+                    surge_damage = self.surge;
+                    atk += surge_damage;
+                }
+                self.surge = 0;
+                self.b2b = false;
+            }
             self.attack_pending += atk;
-            self.b2b = is_b2b_event;
 
             self.lines_total += n;
             const new_level = self.cfg.start_level + self.lines_total / self.cfg.lines_per_level;
@@ -426,7 +471,7 @@ pub const Game = struct {
                 self.level = new_level;
                 self.pushEvent(.{ .level_up = new_level });
             }
-            self.pushEvent(.{ .clear = .{ .lines = n, .attack = atk, .combo = self.combo, .b2b = self.b2b } });
+            self.pushEvent(.{ .clear = .{ .lines = n, .attack = atk, .combo = self.combo, .b2b = self.b2b, .surge = self.surge, .surge_damage = surge_damage } });
         } else {
             self.combo = -1;
         }
@@ -461,6 +506,7 @@ pub const Game = struct {
         h ^= (@as(u64, @intFromEnum(self.active.kind)) << 32) ^ (@as(u64, @intFromEnum(self.active.rot)) << 40);
         h ^= self.bag.bags_drawn *% 0x94d049bb133111eb;
         h ^= self.score ^ (self.pieces << 1);
+        h ^= self.surge ^ (@as(u64, @intFromBool(self.b2b)) << 32);
         return h;
     }
 };
@@ -563,4 +609,252 @@ test "reseed" {
         if (b) distinct += 1;
     }
     try std.testing.expect(distinct > 1);
+}
+
+fn stageCell(g: *Game, x: u32, y: u32) void {
+    g.field.cells[@as(usize, y) * g.field.w + x] = cell_mod.Cell.make(.normal, .s);
+    g.field.rows[y] |= (@as(u128, 1) << @intCast(x));
+}
+
+fn stageRowExcept(g: *Game, y: u32, gaps: []const u32) void {
+    var x: u32 = 0;
+    while (x < g.field.w) : (x += 1) {
+        var gap = false;
+        for (gaps) |gx| {
+            if (gx == x) {
+                gap = true;
+                break;
+            }
+        }
+        if (!gap) stageCell(g, x, y);
+    }
+}
+
+test "mini spin single" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{ .w = 10, .h = 40, .visible_h = 20, .endless = false });
+    defer g.deinit();
+    // T pointing right at (3,0); row 1 completes on lock; 3 corners filled.
+    stageRowExcept(&g, 1, &.{4});
+    stageCell(&g, 3, 2);
+    stageCell(&g, 5, 2);
+    stageCell(&g, 3, 0);
+    g.active = .{ .kind = .t, .rot = .right, .x = 3, .y = 0 };
+    g.last_was_rotate = true;
+    g.last_kick = 0;
+    g.lockNow();
+    try std.testing.expectEqual(@as(u64, 200), g.score);
+    try std.testing.expectEqual(@as(u32, 1), g.lines_total);
+    try std.testing.expectEqual(@as(u32, 0), g.attack_pending);
+    try std.testing.expectEqual(@as(u32, 1), g.surge);
+    try std.testing.expect(g.b2b);
+    var saw_spin = false;
+    for (g.drainEvents()) |e| {
+        if (e == .spin) {
+            saw_spin = true;
+            try std.testing.expectEqual(PieceKind.t, e.spin.kind);
+            try std.testing.expectEqual(@as(u32, 1), e.spin.lines);
+        }
+        if (e == .clear) {
+            try std.testing.expectEqual(@as(u32, 0), e.clear.attack);
+            try std.testing.expectEqual(@as(u32, 1), e.clear.surge);
+            try std.testing.expectEqual(@as(u32, 0), e.clear.surge_damage);
+        }
+    }
+    try std.testing.expect(saw_spin);
+}
+
+test "o never spins" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{ .w = 10, .h = 40, .visible_h = 20, .endless = false });
+    defer g.deinit();
+    stageRowExcept(&g, 2, &.{ 8, 9 });
+    stageRowExcept(&g, 3, &.{ 8, 9 });
+    g.active = .{ .kind = .o, .rot = .spawn, .x = 7, .y = 0 };
+    g.last_was_rotate = true;
+    g.last_kick = 3;
+    g.lockNow();
+    try std.testing.expectEqual(@as(u64, 300), g.score);
+    try std.testing.expectEqual(@as(u32, 1), g.attack_pending);
+    try std.testing.expect(!g.b2b);
+    try std.testing.expectEqual(@as(u32, 0), g.surge);
+    for (g.drainEvents()) |e| {
+        try std.testing.expect(e != .spin);
+    }
+}
+
+test "surge discharge" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{ .w = 10, .h = 40, .visible_h = 20, .endless = false });
+    defer g.deinit();
+    g.b2b = true;
+    g.surge = 5;
+    stageRowExcept(&g, 2, &.{ 8, 9 });
+    stageRowExcept(&g, 3, &.{ 8, 9 });
+    g.active = .{ .kind = .o, .rot = .spawn, .x = 7, .y = 0 };
+    g.last_was_rotate = false;
+    g.lockNow();
+    // double(1) + btb active(1) + surge discharge(5).
+    try std.testing.expectEqual(@as(u32, 7), g.attack_pending);
+    try std.testing.expectEqual(@as(u32, 0), g.surge);
+    try std.testing.expect(!g.b2b);
+    for (g.drainEvents()) |e| {
+        if (e == .clear) {
+            try std.testing.expectEqual(@as(u32, 5), e.clear.surge_damage);
+            try std.testing.expectEqual(@as(u32, 0), e.clear.surge);
+        }
+    }
+}
+
+test "surge below threshold" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{ .w = 10, .h = 40, .visible_h = 20, .endless = false });
+    defer g.deinit();
+    g.b2b = true;
+    g.surge = 3;
+    stageRowExcept(&g, 2, &.{ 8, 9 });
+    stageRowExcept(&g, 3, &.{ 8, 9 });
+    g.active = .{ .kind = .o, .rot = .spawn, .x = 7, .y = 0 };
+    g.last_was_rotate = false;
+    g.lockNow();
+    // double(1) + btb active(1), no discharge.
+    try std.testing.expectEqual(@as(u32, 2), g.attack_pending);
+    try std.testing.expectEqual(@as(u32, 0), g.surge);
+    try std.testing.expect(!g.b2b);
+}
+
+test "btb plus one tetris" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{ .w = 10, .h = 40, .visible_h = 20, .endless = false });
+    defer g.deinit();
+    g.b2b = true;
+    g.surge = 2;
+    stageRowExcept(&g, 0, &.{9});
+    stageRowExcept(&g, 1, &.{9});
+    stageRowExcept(&g, 2, &.{9});
+    stageRowExcept(&g, 3, &.{9});
+    g.active = .{ .kind = .i, .rot = .right, .x = 7, .y = 0 };
+    g.last_was_rotate = false;
+    g.lockNow();
+    try std.testing.expectEqual(@as(u64, 1200), g.score);
+    try std.testing.expectEqual(@as(u32, 5), g.attack_pending);
+    try std.testing.expectEqual(@as(u32, 3), g.surge);
+    try std.testing.expect(g.b2b);
+}
+
+test "restart resets surge" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{ .seed = 7, .endless = false });
+    defer g.deinit();
+    g.b2b = true;
+    g.surge = 7;
+    g.attack_pending = 9;
+    g.restart(7);
+    try std.testing.expectEqual(@as(u32, 0), g.surge);
+    try std.testing.expect(!g.b2b);
+    try std.testing.expectEqual(@as(u32, 0), g.attack_pending);
+}
+
+test "dcd cuts das" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{ .w = 10, .h = 40, .visible_h = 20, .endless = false });
+    defer g.deinit();
+    g.doAction(.hard_drop);
+    g.are_timer = 0;
+    const x0 = g.active.x;
+    g.tick(0.005, .{ .left = true });
+    try std.testing.expectEqual(x0, g.active.x);
+    g.tick(0.005, .{ .left = true });
+    try std.testing.expectEqual(x0, g.active.x);
+    g.tick(0.01, .{ .left = true });
+    try std.testing.expectEqual(x0, g.active.x);
+    g.tick(0.01, .{ .left = true });
+    try std.testing.expectEqual(x0 - 1, g.active.x);
+}
+
+test "arr zero teleports" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{
+        .w = 10,
+        .h = 40,
+        .visible_h = 20,
+        .endless = false,
+        .das_sec = 0,
+        .arr_sec = 0,
+        .dcd_sec = 0,
+    });
+    defer g.deinit();
+    g.tick(0.25, .{});
+    const x0 = g.active.x;
+    g.tick(0.01, .{ .left = true });
+    try std.testing.expectEqual(x0 - 1, g.active.x);
+    g.tick(0.01, .{ .left = true });
+    try std.testing.expectEqual(@as(i32, 0), g.active.x);
+}
+
+test "sdf inf slams" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{
+        .w = 10,
+        .h = 40,
+        .visible_h = 20,
+        .endless = false,
+        .sdf = 41.0,
+    });
+    defer g.deinit();
+    g.are_timer = 0;
+    const y0 = g.active.y;
+    try std.testing.expect(y0 > 0);
+    g.tick(0.001, .{ .soft = true });
+    const gy = g.active.y;
+    try std.testing.expectEqual(g.ghostY(), gy);
+    try std.testing.expect(gy < y0);
+    try std.testing.expectEqual(@as(u64, @intCast(y0 - gy)), g.score);
+    // Stays down, no runaway.
+    g.tick(0.1, .{ .soft = true });
+    try std.testing.expectEqual(gy, g.active.y);
+}
+
+test "sdf forty is finite" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{
+        .w = 10,
+        .h = 40,
+        .visible_h = 20,
+        .endless = false,
+        .sdf = 40.0,
+    });
+    defer g.deinit();
+    g.are_timer = 0;
+    const y0 = g.active.y;
+    g.tick(0.001, .{ .soft = true });
+    try std.testing.expectEqual(y0, g.active.y);
+}
+
+test "sdf soft drop" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{
+        .w = 10,
+        .h = 40,
+        .visible_h = 20,
+        .endless = false,
+        .sdf = 6.0,
+    });
+    defer g.deinit();
+    g.are_timer = 0;
+    const y0 = g.active.y;
+    g.tick(0.2, .{ .soft = true });
+    try std.testing.expectEqual(y0 - 1, g.active.y);
+    var slow = try Game.init(alloc, .{
+        .w = 10,
+        .h = 40,
+        .visible_h = 20,
+        .endless = false,
+        .sdf = 1.0,
+    });
+    defer slow.deinit();
+    slow.are_timer = 0;
+    const sy0 = slow.active.y;
+    slow.tick(0.2, .{ .soft = true });
+    try std.testing.expectEqual(sy0, slow.active.y);
 }

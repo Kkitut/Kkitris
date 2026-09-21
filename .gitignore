@@ -3,6 +3,7 @@
 /zig-out
 /.zig-cache
 /local.json
+/settings.json
 /server/target
 /server/Cargo.lock
 /.code
