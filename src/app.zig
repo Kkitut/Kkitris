@@ -58,15 +58,19 @@ fn getState(window: ?*c.GLFWwindow) ?*AppState {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn nextSeed(st: *AppState) u64 {
+    st.seed_counter +%= 1;
+    const time_ms: u64 = @intFromFloat(@max(st.time, 0) * 1000.0);
+    return 0x9e3779b97f4a7c15 *% st.seed_counter ^ (time_ms *% 0xbf58476d1ce4e5b9);
+}
+
 fn startPlay(st: *AppState) void {
     if (st.has_game) {
         st.game.deinit();
         st.has_game = false;
     }
     const dims = MenuSize.tall.dims();
-    st.seed_counter +%= 1;
-    const time_ms: u64 = @intFromFloat(@max(st.time, 0) * 1000.0);
-    const seed: u64 = 0x9e3779b97f4a7c15 *% st.seed_counter ^ (time_ms *% 0xbf58476d1ce4e5b9);
+    const seed = nextSeed(st);
     const cfg = RulesConfig{
         .w = dims.w,
         .h = dims.h,
@@ -301,7 +305,7 @@ fn keyCallback(
                     if (released) st.held.soft = false;
                 },
                 c.GLFW_KEY_R => {
-                    if (pressed) st.game.restart();
+                    if (pressed) st.game.restart(nextSeed(st));
                 },
                 else => {
                     if (!pressed) return;

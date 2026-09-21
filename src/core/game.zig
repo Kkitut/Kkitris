@@ -103,9 +103,9 @@ pub const Game = struct {
         self.field.deinit();
     }
 
-    pub fn restart(self: *Game) void {
+    pub fn restart(self: *Game, seed: u64) void {
         self.field.clear();
-        self.bag = Bag.init(self.cfg.seed);
+        self.bag = Bag.init(seed);
         self.held = null;
         self.can_hold = true;
         self.fall_acc = 0;
@@ -540,4 +540,25 @@ test "hash" {
         b.doAction(x);
     }
     try std.testing.expectEqual(a.hash(), b.hash());
+}
+
+test "reseed" {
+    const alloc = std.testing.allocator;
+    var g = try Game.init(alloc, .{ .seed = 42, .endless = false });
+    defer g.deinit();
+    const first = g.active.kind;
+    g.restart(42);
+    try std.testing.expectEqual(first, g.active.kind);
+    var seen = [_]bool{false} ** 7;
+    seen[@intFromEnum(first)] = true;
+    var s: u64 = 43;
+    while (s < 60) : (s += 1) {
+        g.restart(s);
+        seen[@intFromEnum(g.active.kind)] = true;
+    }
+    var distinct: u32 = 0;
+    for (seen) |b| {
+        if (b) distinct += 1;
+    }
+    try std.testing.expect(distinct > 1);
 }
