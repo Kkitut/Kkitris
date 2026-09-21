@@ -492,11 +492,13 @@ test "lineclear" {
 
 test "endless" {
     const alloc = std.testing.allocator;
-    var g = try Game.init(alloc, .{ .w = 4, .h = 1, .visible_h = 1, .endless = true });
+    var g = try Game.init(alloc, .{ .w = 4, .h = 4, .visible_h = 4, .endless = true });
     defer g.deinit();
-    for (0..4) |x| {
-        g.field.cells[x] = cell_mod.Cell.make(.normal, .s);
-        g.field.rows[0] |= (@as(u128, 1) << @intCast(x));
+    for (0..4) |y| {
+        for (0..4) |x| {
+            g.field.cells[@as(usize, y) * 4 + x] = cell_mod.Cell.make(.normal, .s);
+            g.field.rows[y] |= (@as(u128, 1) << @intCast(x));
+        }
     }
     g.spawnNext();
     try std.testing.expect(g.resets >= 1);

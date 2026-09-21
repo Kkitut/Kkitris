@@ -236,7 +236,7 @@ test "collide" {
     var f = try Field.init(alloc, 10, 40);
     defer f.deinit();
     const m = piece_mod.MASKS[@intFromEnum(piece_mod.PieceKind.o)][0];
-    try std.testing.expect(f.collides(m, 4, -1));
+    try std.testing.expect(f.collides(m, 4, -3));
     try std.testing.expect(!f.collides(m, 4, 0));
     try std.testing.expect(f.collides(m, -2, 0));
     try std.testing.expect(f.collides(m, 9, 0));
@@ -249,9 +249,9 @@ test "lock" {
     const m = piece_mod.MASKS[@intFromEnum(piece_mod.PieceKind.o)][0];
     _ = f.lock(m, 4, 0, .normal, .o);
     try std.testing.expect(f.collides(m, 4, 0));
-    try std.testing.expect(f.get(5, 0).occupied);
-    try std.testing.expect(f.get(5, 0).link.px);
-    try std.testing.expect(f.get(6, 0).link.nx);
+    try std.testing.expect(f.get(5, 2).occupied);
+    try std.testing.expect(f.get(5, 2).link.px);
+    try std.testing.expect(f.get(6, 2).link.nx);
 }
 
 test "clear" {

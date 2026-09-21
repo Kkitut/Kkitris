@@ -96,3 +96,25 @@ test "O rot" {
     const r = tryRotate(&f, .o, .spawn, .right, 4, 0);
     try std.testing.expect(r.ok);
 }
+
+test "S floor kick" {
+    const alloc = std.testing.allocator;
+    var f = try Field.init(alloc, 10, 40);
+    defer f.deinit();
+    const r = tryRotate(&f, .s, .spawn, .right, 4, -2);
+    try std.testing.expect(r.ok);
+    try std.testing.expectEqual(@as(u8, 2), r.kick_index);
+    try std.testing.expectEqual(@as(i32, 3), r.x);
+    try std.testing.expectEqual(@as(i32, -1), r.y);
+}
+
+test "Z floor kick" {
+    const alloc = std.testing.allocator;
+    var f = try Field.init(alloc, 10, 40);
+    defer f.deinit();
+    const r = tryRotate(&f, .z, .spawn, .left, 4, -2);
+    try std.testing.expect(r.ok);
+    try std.testing.expectEqual(@as(u8, 2), r.kick_index);
+    try std.testing.expectEqual(@as(i32, 5), r.x);
+    try std.testing.expectEqual(@as(i32, -1), r.y);
+}

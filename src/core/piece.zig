@@ -50,17 +50,17 @@ pub const Rotation = enum(u2) {
 pub const MASKS: [7][4][4]u16 = .{
     // I
     .{
-        .{ 0b0000, 0b1111, 0b0000, 0b0000 },
-        .{ 0b0010, 0b0010, 0b0010, 0b0010 },
         .{ 0b0000, 0b0000, 0b1111, 0b0000 },
         .{ 0b0100, 0b0100, 0b0100, 0b0100 },
+        .{ 0b0000, 0b1111, 0b0000, 0b0000 },
+        .{ 0b0010, 0b0010, 0b0010, 0b0010 },
     },
     // O
     .{
-        .{ 0b0110, 0b0110, 0b0000, 0b0000 },
-        .{ 0b0110, 0b0110, 0b0000, 0b0000 },
-        .{ 0b0110, 0b0110, 0b0000, 0b0000 },
-        .{ 0b0110, 0b0110, 0b0000, 0b0000 },
+        .{ 0b0000, 0b0000, 0b0110, 0b0110 },
+        .{ 0b0000, 0b0000, 0b0110, 0b0110 },
+        .{ 0b0000, 0b0000, 0b0110, 0b0110 },
+        .{ 0b0000, 0b0000, 0b0110, 0b0110 },
     },
     // T
     .{
@@ -71,31 +71,31 @@ pub const MASKS: [7][4][4]u16 = .{
     },
     // S
     .{
-        .{ 0b0011, 0b0110, 0b0000, 0b0000 },
-        .{ 0b0010, 0b0011, 0b0001, 0b0000 },
+        .{ 0b0000, 0b0000, 0b0011, 0b0110 },
+        .{ 0b0000, 0b0100, 0b0110, 0b0010 },
         .{ 0b0000, 0b0011, 0b0110, 0b0000 },
-        .{ 0b0100, 0b0110, 0b0010, 0b0000 },
+        .{ 0b0000, 0b0010, 0b0011, 0b0001 },
     },
     // Z
     .{
-        .{ 0b0110, 0b0011, 0b0000, 0b0000 },
-        .{ 0b0001, 0b0011, 0b0010, 0b0000 },
+        .{ 0b0000, 0b0000, 0b0110, 0b0011 },
+        .{ 0b0000, 0b0010, 0b0110, 0b0100 },
         .{ 0b0000, 0b0110, 0b0011, 0b0000 },
-        .{ 0b0010, 0b0110, 0b0100, 0b0000 },
+        .{ 0b0000, 0b0001, 0b0011, 0b0010 },
     },
     // J
     .{
-        .{ 0b0000, 0b0111, 0b0001, 0b0000 },
-        .{ 0b0010, 0b0010, 0b0110, 0b0000 },
-        .{ 0b0100, 0b0111, 0b0000, 0b0000 },
-        .{ 0b0011, 0b0010, 0b0010, 0b0000 },
+        .{ 0b0000, 0b0000, 0b0111, 0b0001 },
+        .{ 0b0000, 0b0010, 0b0010, 0b0110 },
+        .{ 0b0000, 0b0100, 0b0111, 0b0000 },
+        .{ 0b0000, 0b0011, 0b0010, 0b0010 },
     },
     // L
     .{
-        .{ 0b0000, 0b0111, 0b0100, 0b0000 },
-        .{ 0b0110, 0b0010, 0b0010, 0b0000 },
-        .{ 0b0001, 0b0111, 0b0000, 0b0000 },
-        .{ 0b0010, 0b0010, 0b0011, 0b0000 },
+        .{ 0b0000, 0b0000, 0b0111, 0b0100 },
+        .{ 0b0000, 0b0110, 0b0010, 0b0010 },
+        .{ 0b0000, 0b0001, 0b0111, 0b0000 },
+        .{ 0b0000, 0b0010, 0b0010, 0b0011 },
     },
 };
 
@@ -127,7 +127,7 @@ test "4 cells" {
 }
 
 test "I mask" {
-    try std.testing.expectEqual(@as(u16, 0b1111), MASKS[0][0][1]);
+    try std.testing.expectEqual(@as(u16, 0b1111), MASKS[0][0][2]);
 }
 
 fn cellsOf(m: [4]u16, out: *[4][2]i32) void {
@@ -204,11 +204,11 @@ fn cwStep(cells: [4][2]i32) [4][2]i32 {
 }
 
 test "spawn shapes" {
-    try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.j)][0], [4]u16{ 0, 0b0111, 0b0001, 0 });
-    try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.l)][0], [4]u16{ 0, 0b0111, 0b0100, 0 });
+    try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.j)][0], [4]u16{ 0, 0, 0b0111, 0b0001 });
+    try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.l)][0], [4]u16{ 0, 0, 0b0111, 0b0100 });
     try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.t)][0], [4]u16{ 0, 0, 0b0111, 0b0010 });
-    try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.s)][0], [4]u16{ 0b0011, 0b0110, 0, 0 });
-    try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.z)][0], [4]u16{ 0b0110, 0b0011, 0, 0 });
+    try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.s)][0], [4]u16{ 0, 0, 0b0011, 0b0110 });
+    try std.testing.expectEqual(MASKS[@intFromEnum(PieceKind.z)][0], [4]u16{ 0, 0, 0b0110, 0b0011 });
 }
 
 test "rot cycle" {
