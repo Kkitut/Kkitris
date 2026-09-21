@@ -5,3 +5,4 @@
 /local.json
 /server/target
 /server/Cargo.lock
+/.code
