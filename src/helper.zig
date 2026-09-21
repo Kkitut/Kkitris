@@ -13,13 +13,13 @@ pub fn getExecutableDirectory(io: std.Io, buffer: []u8) ?[]u8 {
     return buffer[0..len];
 }
 
-test "makePath joins base and name" {
+test "makepath" {
     var buf: [64]u8 = undefined;
     const p = makePath(&buf, "/a/b", "c/d");
     try std.testing.expectEqualStrings("/a/b/c/d", p.?);
 }
 
-test "makePath returns null when buffer too small" {
+test "makepath small" {
     var buf: [4]u8 = undefined;
     try std.testing.expect(makePath(&buf, "/a/b", "c") == null);
 }

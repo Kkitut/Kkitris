@@ -40,6 +40,17 @@ pub fn build(b: *std.Build) void {
     const run_helper_tests = b.addRunArtifact(helper_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_helper_tests.step);
+
+    // Full suite: core (cell/piece/field/srs/bag/config/game),
+    // render (camera/scene), net proto, ui stub, helper.
+    const suite_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const suite_tests = b.addTest(.{ .root_module = suite_mod });
+    const run_suite_tests = b.addRunArtifact(suite_tests);
+    test_step.dependOn(&run_suite_tests.step);
 }
 
 fn findWgslCompiler(b: *std.Build) []const u8 {

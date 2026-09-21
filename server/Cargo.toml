@@ -1,0 +1,19 @@
+[package]
+name = "kkitris-server"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.53.1", features = ["full"] }
+quinn = "0.11.12"
+rustls = "0.23.45"
+rcgen = "0.13.2"
+snow = "0.9.6"
+bincode = "2.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+uuid = { version = "1.26.1", features = ["v4", "serde"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+dashmap = "6.2.1"
+clap = { version = "4.6.7", features = ["derive"] }
+thiserror = "2.0.20"

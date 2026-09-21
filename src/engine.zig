@@ -16,13 +16,10 @@ const Buffer = struct {
     memory: c.VkDeviceMemory,
 };
 
-const InstanceData = extern struct {
-    color: [4]f32,
-    position: [2]f32,
-    scale: [2]f32,
-    rotation: f32,
-    texture_index: u32,
-};
+const inst_mod = @import("render/instance.zig");
+const InstanceData = inst_mod.InstanceData;
+const MAX_INSTANCES = inst_mod.MAX_INSTANCES;
+const Skin = inst_mod.Skin;
 
 pub const Engine = struct {
     window: ?*c.GLFWwindow = null,
@@ -54,13 +51,23 @@ pub const Engine = struct {
     instance_buffer: c.VkBuffer = null,
     instance_memory: c.VkDeviceMemory = null,
     instance_mapped: []u8 = &.{},
-    test_image: c.VkImage = null,
-    test_image_memory: c.VkDeviceMemory = null,
-    test_image_view: c.VkImageView = null,
+    instance_count: u32 = 0,
+    skin_images: [Skin.count]c.VkImage = [_]c.VkImage{null} ** Skin.count,
+    skin_memories: [Skin.count]c.VkDeviceMemory = [_]c.VkDeviceMemory{null} ** Skin.count,
+    skin_views: [Skin.count]c.VkImageView = [_]c.VkImageView{null} ** Skin.count,
     test_sampler: c.VkSampler = null,
     descriptor_pool: c.VkDescriptorPool = null,
     descriptor_set: c.VkDescriptorSet = null,
-    test_rotation: f32 = 0,
+    dump_requested: bool = false,
+    dump_buffer: c.VkBuffer = null,
+    dump_memory: c.VkDeviceMemory = null,
+    dump_bytes: u64 = 0,
+    transform: [16]f32 = .{
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    },
     io: std.Io,
     allocator: std.mem.Allocator,
 
@@ -190,19 +197,19 @@ pub const Engine = struct {
             self.test_sampler = null;
         }
 
-        if (self.test_image_view != null) {
-            c.vkDestroyImageView(self.device, self.test_image_view, null);
-            self.test_image_view = null;
-        }
-
-        if (self.test_image != null) {
-            c.vkDestroyImage(self.device, self.test_image, null);
-            self.test_image = null;
-        }
-
-        if (self.test_image_memory != null) {
-            c.vkFreeMemory(self.device, self.test_image_memory, null);
-            self.test_image_memory = null;
+        for (0..Skin.count) |i| {
+            if (self.skin_views[i] != null) {
+                c.vkDestroyImageView(self.device, self.skin_views[i], null);
+                self.skin_views[i] = null;
+            }
+            if (self.skin_images[i] != null) {
+                c.vkDestroyImage(self.device, self.skin_images[i], null);
+                self.skin_images[i] = null;
+            }
+            if (self.skin_memories[i] != null) {
+                c.vkFreeMemory(self.device, self.skin_memories[i], null);
+                self.skin_memories[i] = null;
+            }
         }
 
         if (self.descriptor_pool != null) {
@@ -210,30 +217,51 @@ pub const Engine = struct {
             self.descriptor_pool = null;
             self.descriptor_set = null;
         }
+
+        if (self.dump_buffer != null) {
+            c.vkDestroyBuffer(self.device, self.dump_buffer, null);
+            self.dump_buffer = null;
+        }
+        if (self.dump_memory != null) {
+            c.vkFreeMemory(self.device, self.dump_memory, null);
+            self.dump_memory = null;
+        }
+        self.dump_bytes = 0;
+        self.dump_requested = false;
     }
 
     pub fn update(self: *Engine, dt: f32) void {
-        self.test_rotation += dt * 0.8;
-        self.writeTestInstance();
+        _ = self;
+        _ = dt;
     }
 
-    fn writeTestInstance(self: *Engine) void {
-        if (self.instance_mapped.len < @sizeOf(InstanceData)) return;
-
-        const w: f32 = @floatFromInt(self.swapchain_extent.width);
-        const h: f32 = @floatFromInt(self.swapchain_extent.height);
-        const inst = InstanceData{
-            .color = .{ 1.0, 0.45, 0.1, 1.0 },
-            .position = .{ w * 0.5, h * 0.5 },
-            .scale = .{ 220, 220 },
-            .rotation = self.test_rotation,
-            .texture_index = 0,
+    pub fn setOrtho(self: *Engine, w: f32, h: f32) void {
+        self.transform = [16]f32{
+            2 / w, 0,     0, 0,
+            0,     2 / h, 0, 0,
+            0,     0,     1, 0,
+            -1,    -1,    0, 1,
         };
+    }
+
+    pub fn setViewProj(self: *Engine, m: [16]f32) void {
+        self.transform = m;
+    }
+
+    pub fn setInstances(self: *Engine, list: []const InstanceData) void {
+        const bytes = @sizeOf(InstanceData);
+        const max_n = self.instance_mapped.len / bytes;
+        const n = @min(list.len, max_n);
+        if (n == 0) {
+            self.instance_count = 0;
+            return;
+        }
         std.mem.copyForwards(
             u8,
-            self.instance_mapped[0..@sizeOf(InstanceData)],
-            std.mem.asBytes(&inst),
+            self.instance_mapped[0 .. n * bytes],
+            std.mem.sliceAsBytes(list[0..n]),
         );
+        self.instance_count = @intCast(n);
     }
 
     pub fn render(self: *Engine) void {
@@ -361,26 +389,23 @@ pub const Engine = struct {
             null,
         );
 
-        const w: f32 = @floatFromInt(self.swapchain_extent.width);
-        const h: f32 = @floatFromInt(self.swapchain_extent.height);
-        var proj = [16]f32{
-            2 / w, 0,     0, 0,
-            0,     2 / h, 0, 0,
-            0,     0,     1, 0,
-            -1,    -1,    0, 1,
-        };
+        var xform = self.transform;
         c.vkCmdPushConstants(
             command_buffer,
             self.pipeline_layout,
             c.VK_SHADER_STAGE_VERTEX_BIT,
             0,
             64,
-            @ptrCast(&proj),
+            @ptrCast(&xform),
         );
 
-        c.vkCmdDraw(command_buffer, 6, 1, 0, 0);
+        c.vkCmdDraw(command_buffer, 6, self.instance_count, 0, 0);
 
         c.vkCmdEndRenderPass(command_buffer);
+
+        if (self.dump_requested) {
+            self.captureFrame(command_buffer, image_index);
+        }
 
         result = c.vkEndCommandBuffer(command_buffer);
         if (result != c.VK_SUCCESS) {
@@ -435,7 +460,188 @@ pub const Engine = struct {
             return;
         }
 
+        if (self.dump_requested) {
+            self.writeDump();
+        }
+
         self.current_frame = (self.current_frame + 1) % max_frames_in_flight;
+    }
+
+    fn captureFrame(self: *Engine, cmd: c.VkCommandBuffer, image_index: u32) void {
+        const w = self.swapchain_extent.width;
+        const h = self.swapchain_extent.height;
+        const need: u64 = @as(u64, w) * @as(u64, h) * 4;
+        if (self.dump_buffer == null or self.dump_bytes != need) {
+            if (self.dump_buffer != null) {
+                c.vkDestroyBuffer(self.device, self.dump_buffer, null);
+                self.dump_buffer = null;
+            }
+            if (self.dump_memory != null) {
+                c.vkFreeMemory(self.device, self.dump_memory, null);
+                self.dump_memory = null;
+            }
+            const host = c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            const b = self.createBuffer(
+                need,
+                c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                host,
+            ) catch {
+                logger.fail("Dump: buffer alloc failed", .{});
+                self.dump_requested = false;
+                return;
+            };
+            self.dump_buffer = b.handle;
+            self.dump_memory = b.memory;
+            self.dump_bytes = need;
+        }
+
+        const img = self.swapchain_images[image_index];
+        var to_src = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT,
+            .oldLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = img,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        c.vkCmdPipelineBarrier(
+            cmd,
+            c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            &to_src,
+        );
+
+        const region = c.VkBufferImageCopy{
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
+            .imageExtent = .{ .width = w, .height = h, .depth = 1 },
+        };
+        c.vkCmdCopyImageToBuffer(
+            cmd,
+            img,
+            c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            self.dump_buffer,
+            1,
+            &region,
+        );
+
+        var to_present = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT,
+            .dstAccessMask = 0,
+            .oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .newLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = img,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        c.vkCmdPipelineBarrier(
+            cmd,
+            c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            &to_present,
+        );
+    }
+
+    fn writeDump(self: *Engine) void {
+        defer self.dump_requested = false;
+        _ = c.vkQueueWaitIdle(self.graphics_queue);
+
+        const w = self.swapchain_extent.width;
+        const h = self.swapchain_extent.height;
+        var mapped: ?*anyopaque = null;
+        const result = c.vkMapMemory(
+            self.device,
+            self.dump_memory,
+            0,
+            self.dump_bytes,
+            0,
+            &mapped,
+        );
+        if (result != c.VK_SUCCESS or mapped == null) {
+            logger.fail("Dump: map failed: {d}", .{result});
+            return;
+        }
+        defer c.vkUnmapMemory(self.device, self.dump_memory);
+
+        const src = @as([*]const u8, @ptrCast(mapped.?))[0..self.dump_bytes];
+        const cwd = std.Io.Dir.cwd();
+        var file = cwd.createFile(self.io, "/tmp/kkitris_frame.ppm", .{}) catch {
+            logger.fail("Dump: cannot create /tmp/kkitris_frame.ppm", .{});
+            return;
+        };
+        defer file.close(self.io);
+        var file_buf: [8192]u8 = undefined;
+        var writer = file.writer(self.io, &file_buf);
+        writer.interface.print("P6\n{d} {d}\n255\n", .{ w, h }) catch {
+            logger.fail("Dump: header write failed", .{});
+            return;
+        };
+        const bgra = self.swapchain_image_format == 44 or
+            self.swapchain_image_format == 50;
+        var y: u32 = 0;
+        while (y < h) : (y += 1) {
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                const o = (@as(usize, y) * @as(usize, w) + x) * 4;
+                if (bgra) {
+                    const px = [_]u8{ src[o + 2], src[o + 1], src[o] };
+                    writer.interface.writeAll(&px) catch {
+                        logger.fail("Dump: pixel write failed", .{});
+                        return;
+                    };
+                } else {
+                    writer.interface.writeAll(src[o .. o + 3]) catch {
+                        logger.fail("Dump: pixel write failed", .{});
+                        return;
+                    };
+                }
+            }
+        }
+        writer.interface.flush() catch {};
+        logger.info(
+            "Dump: {d}x{d} fmt={d} instances={d} -> /tmp/kkitris_frame.ppm",
+            .{ w, h, self.swapchain_image_format, self.instance_count },
+        );
     }
 
     pub fn deinit(self: *Engine) void {
@@ -1034,7 +1240,8 @@ pub const Engine = struct {
             .imageColorSpace = self.swapchain_image_color_space,
             .imageExtent = extent,
             .imageArrayLayers = 1,
-            .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                c.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             .imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = null,
@@ -1608,8 +1815,9 @@ pub const Engine = struct {
         const host_visible_coherent =
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
+        const instance_bytes: u64 = MAX_INSTANCES * @sizeOf(InstanceData);
         const ibuf = try self.createBuffer(
-            @sizeOf(InstanceData),
+            instance_bytes,
             c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             host_visible_coherent,
         );
@@ -1621,7 +1829,7 @@ pub const Engine = struct {
             self.device,
             self.instance_memory,
             0,
-            @sizeOf(InstanceData),
+            instance_bytes,
             0,
             &mapped,
         );
@@ -1630,186 +1838,37 @@ pub const Engine = struct {
             return error.BufferFailed;
         }
         self.instance_mapped =
-            @as([*]u8, @ptrCast(mapped.?))[0..@sizeOf(InstanceData)];
-        self.writeTestInstance();
+            @as([*]u8, @ptrCast(mapped.?))[0..instance_bytes];
+        self.instance_count = 0;
 
-        const pixels = [_]u8{ 255, 255, 255, 255 };
+        const skin_bytes: usize = Skin.size_px * Skin.size_px * 4;
         const staging = try self.createBuffer(
-            pixels.len,
+            skin_bytes,
             c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             host_visible_coherent,
         );
         defer c.vkDestroyBuffer(self.device, staging.handle, null);
         defer c.vkFreeMemory(self.device, staging.memory, null);
 
-        var smapped: ?*anyopaque = null;
-        result = c.vkMapMemory(self.device, staging.memory, 0, pixels.len, 0, &smapped);
-        if (result != c.VK_SUCCESS or smapped == null) {
-            logger.fail("Failed to map staging buffer: {d}", .{result});
-            return error.BufferFailed;
-        }
-        @memcpy(@as([*]u8, @ptrCast(smapped.?))[0..pixels.len], &pixels);
-        c.vkUnmapMemory(self.device, staging.memory);
+        var pixels: [Skin.size_px * Skin.size_px * 4]u8 = undefined;
+        for (0..Skin.count) |i| {
+            makeSkinPixels(i, &pixels);
+            var smapped: ?*anyopaque = null;
+            result = c.vkMapMemory(self.device, staging.memory, 0, skin_bytes, 0, &smapped);
+            if (result != c.VK_SUCCESS or smapped == null) {
+                logger.fail("Failed to map staging buffer: {d}", .{result});
+                return error.BufferFailed;
+            }
+            @memcpy(@as([*]u8, @ptrCast(smapped.?))[0..skin_bytes], &pixels);
+            c.vkUnmapMemory(self.device, staging.memory);
 
-        const img_info = c.VkImageCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-            .pNext = null,
-            .flags = 0,
-            .imageType = c.VK_IMAGE_TYPE_2D,
-            .format = c.VK_FORMAT_R8G8B8A8_UNORM,
-            .extent = .{ .width = 1, .height = 1, .depth = 1 },
-            .mipLevels = 1,
-            .arrayLayers = 1,
-            .samples = c.VK_SAMPLE_COUNT_1_BIT,
-            .tiling = c.VK_IMAGE_TILING_OPTIMAL,
-            .usage = c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
-            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = null,
-            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-        };
-
-        var img: c.VkImage = null;
-        result = c.vkCreateImage(self.device, &img_info, null, &img);
-        if (result != c.VK_SUCCESS) {
-            logger.fail("Failed to create test image: {d}", .{result});
-            return error.ImageFailed;
-        }
-        errdefer c.vkDestroyImage(self.device, img, null);
-
-        var img_req: c.VkMemoryRequirements = undefined;
-        c.vkGetImageMemoryRequirements(self.device, img, &img_req);
-
-        const img_mem_index = try self.findMemoryType(
-            img_req.memoryTypeBits,
-            c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        );
-        const img_alloc = c.VkMemoryAllocateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .pNext = null,
-            .allocationSize = img_req.size,
-            .memoryTypeIndex = img_mem_index,
-        };
-
-        var img_mem: c.VkDeviceMemory = null;
-        result = c.vkAllocateMemory(self.device, &img_alloc, null, &img_mem);
-        if (result != c.VK_SUCCESS) {
-            logger.fail("Failed to allocate image memory: {d}", .{result});
-            return error.ImageFailed;
-        }
-        errdefer c.vkFreeMemory(self.device, img_mem, null);
-
-        result = c.vkBindImageMemory(self.device, img, img_mem, 0);
-        if (result != c.VK_SUCCESS) {
-            logger.fail("Failed to bind image memory: {d}", .{result});
-            return error.ImageFailed;
+            const up = try self.uploadSkinImage(staging.handle);
+            self.skin_images[i] = up.img;
+            self.skin_memories[i] = up.mem;
+            self.skin_views[i] = up.view;
         }
 
-        const cmd = try self.beginSingleUse();
 
-        var barrier = c.VkImageMemoryBarrier{
-            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .pNext = null,
-            .srcAccessMask = 0,
-            .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
-            .oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
-            .image = img,
-            .subresourceRange = .{
-                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        };
-        c.vkCmdPipelineBarrier(
-            cmd,
-            c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0,
-            0,
-            null,
-            0,
-            null,
-            1,
-            &barrier,
-        );
-
-        const region = c.VkBufferImageCopy{
-            .bufferOffset = 0,
-            .bufferRowLength = 0,
-            .bufferImageHeight = 0,
-            .imageSubresource = .{
-                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-            .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
-            .imageExtent = .{ .width = 1, .height = 1, .depth = 1 },
-        };
-        c.vkCmdCopyBufferToImage(
-            cmd,
-            staging.handle,
-            img,
-            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1,
-            &region,
-        );
-
-        barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
-        barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        c.vkCmdPipelineBarrier(
-            cmd,
-            c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0,
-            0,
-            null,
-            0,
-            null,
-            1,
-            &barrier,
-        );
-
-        try self.endSingleUse(cmd);
-
-        self.test_image = img;
-        self.test_image_memory = img_mem;
-
-        const view_info = c.VkImageViewCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .pNext = null,
-            .flags = 0,
-            .image = img,
-            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-            .format = c.VK_FORMAT_R8G8B8A8_UNORM,
-            .components = .{
-                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-            },
-            .subresourceRange = .{
-                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        };
-        var view: c.VkImageView = null;
-        result = c.vkCreateImageView(self.device, &view_info, null, &view);
-        if (result != c.VK_SUCCESS) {
-            logger.fail("Failed to create test image view: {d}", .{result});
-            return error.ImageFailed;
-        }
-        self.test_image_view = view;
 
         const sampler_info = c.VkSamplerCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -1875,42 +1934,217 @@ pub const Engine = struct {
         }
         self.descriptor_set = set;
 
-        const img_desc = c.VkDescriptorImageInfo{
-            .sampler = null,
-            .imageView = view,
-            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        };
+        var img_descs: [Skin.count]c.VkDescriptorImageInfo = undefined;
+        for (0..Skin.count) |i| {
+            img_descs[i] = .{
+                .sampler = null,
+                .imageView = self.skin_views[i],
+                .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            };
+        }
         const sampler_desc = c.VkDescriptorImageInfo{
             .sampler = sampler,
             .imageView = null,
             .imageLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
         };
-        const writes = [_]c.VkWriteDescriptorSet{
-            .{
+        var writes: [Skin.count + 1]c.VkWriteDescriptorSet = undefined;
+        for (0..Skin.count) |i| {
+            writes[i] = .{
                 .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .pNext = null,
                 .dstSet = set,
                 .dstBinding = 0,
-                .dstArrayElement = 0,
+                .dstArrayElement = @intCast(i),
                 .descriptorCount = 1,
                 .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                .pImageInfo = &img_desc,
+                .pImageInfo = &img_descs[i],
                 .pBufferInfo = null,
                 .pTexelBufferView = null,
-            },
-            .{
-                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .pNext = null,
-                .dstSet = set,
-                .dstBinding = 1,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLER,
-                .pImageInfo = &sampler_desc,
-                .pBufferInfo = null,
-                .pTexelBufferView = null,
+            };
+        }
+        writes[Skin.count] = .{
+            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = set,
+            .dstBinding = 1,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLER,
+            .pImageInfo = &sampler_desc,
+            .pBufferInfo = null,
+            .pTexelBufferView = null,
+        };
+        c.vkUpdateDescriptorSets(self.device, Skin.count + 1, &writes, 0, null);
+    }
+
+    const SkinUpload = struct {
+        img: c.VkImage,
+        mem: c.VkDeviceMemory,
+        view: c.VkImageView,
+    };
+
+    fn uploadSkinImage(self: *Engine, staging: c.VkBuffer) !SkinUpload {
+        const img_info = c.VkImageCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .imageType = c.VK_IMAGE_TYPE_2D,
+            .format = c.VK_FORMAT_R8G8B8A8_UNORM,
+            .extent = .{ .width = Skin.size_px, .height = Skin.size_px, .depth = 1 },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+            .usage = c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = null,
+            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+
+        var img: c.VkImage = null;
+        var result = c.vkCreateImage(self.device, &img_info, null, &img);
+        if (result != c.VK_SUCCESS) {
+            logger.fail("Failed to create skin image: {d}", .{result});
+            return error.ImageFailed;
+        }
+        errdefer c.vkDestroyImage(self.device, img, null);
+
+        var img_req: c.VkMemoryRequirements = undefined;
+        c.vkGetImageMemoryRequirements(self.device, img, &img_req);
+
+        const img_mem_index = try self.findMemoryType(
+            img_req.memoryTypeBits,
+            c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        );
+        const img_alloc = c.VkMemoryAllocateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = null,
+            .allocationSize = img_req.size,
+            .memoryTypeIndex = img_mem_index,
+        };
+
+        var img_mem: c.VkDeviceMemory = null;
+        result = c.vkAllocateMemory(self.device, &img_alloc, null, &img_mem);
+        if (result != c.VK_SUCCESS) {
+            logger.fail("Failed to allocate skin memory: {d}", .{result});
+            return error.ImageFailed;
+        }
+        errdefer c.vkFreeMemory(self.device, img_mem, null);
+
+        result = c.vkBindImageMemory(self.device, img, img_mem, 0);
+        if (result != c.VK_SUCCESS) {
+            logger.fail("Failed to bind skin memory: {d}", .{result});
+            return error.ImageFailed;
+        }
+
+        const cmd = try self.beginSingleUse();
+
+        var barrier = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = 0,
+            .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = img,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
             },
         };
-        c.vkUpdateDescriptorSets(self.device, 2, &writes, 0, null);
+        c.vkCmdPipelineBarrier(
+            cmd,
+            c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            &barrier,
+        );
+
+        const region = c.VkBufferImageCopy{
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
+            .imageExtent = .{ .width = Skin.size_px, .height = Skin.size_px, .depth = 1 },
+        };
+        c.vkCmdCopyBufferToImage(
+            cmd,
+            staging,
+            img,
+            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &region,
+        );
+
+        barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+        barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        c.vkCmdPipelineBarrier(
+            cmd,
+            c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            &barrier,
+        );
+
+        try self.endSingleUse(cmd);
+
+        const view_info = c.VkImageViewCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .image = img,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = c.VK_FORMAT_R8G8B8A8_UNORM,
+            .components = .{
+                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        var view: c.VkImageView = null;
+        result = c.vkCreateImageView(self.device, &view_info, null, &view);
+        if (result != c.VK_SUCCESS) {
+            logger.fail("Failed to create skin view: {d}", .{result});
+            return error.ImageFailed;
+        }
+
+        return .{ .img = img, .mem = img_mem, .view = view };
     }
 };
+
+fn makeSkinPixels(skin: usize, out: []u8) void {
+    _ = skin;
+    @memset(out, 255);
+}
