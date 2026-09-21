@@ -10,13 +10,30 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    exe_mod.linkSystemLibrary("glfw", .{});
+    // No GL headers on this box and the engine is Vulkan-only:
+    // keep glfw3.h from pulling in <GL/gl.h>.
+    exe_mod.addCMacro("GLFW_INCLUDE_NONE", "1");
     exe_mod.linkSystemLibrary("vulkan", .{});
+
+    // Vulkan SDK root: -Dvulkan-sdk=... > $VULKAN_SDK > default install path.
+    // (the SDK's setup-env.sh exports $VULKAN_SDK pointing at the x86_64 dir.)
+    const vulkan_sdk = b.option(
+        []const u8,
+        "vulkan-sdk",
+        "Vulkan SDK root holding include/ and lib/ (defaults to $VULKAN_SDK)",
+    ) orelse b.graph.environ_map.get("VULKAN_SDK") orelse "/mnt/devs/VulkanSDK/1.4.350.1/x86_64";
+    exe_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ vulkan_sdk, "include" }) });
+    exe_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ vulkan_sdk, "lib", "VulkanLoader", "lib" }) });
+
+    // GLFW has no system package here: use the vendored headers + prebuilt
+    // static lib under build/_deps (left over from the old CMake build).
+    exe_mod.addIncludePath(b.path("build/_deps/glfw-src/include"));
 
     const exe = b.addExecutable(.{
         .name = "Kkitris",
         .root_module = exe_mod,
     });
+    exe_mod.addObjectFile(b.path("build/_deps/glfw-build/src/libglfw3.a"));
     b.installArtifact(exe);
 
     // shader
@@ -63,7 +80,7 @@ fn findWgslCompiler(b: *std.Build) []const u8 {
     if (readLocalConfig(b)) |cfg| {
         if (cfg.wgsl_compiler) |tool| return tool;
     }
-    if (b.findProgram(&.{"nagac"}, &.{}) catch null) |tool| {
+    if (b.findProgram(&.{ "nagac", "naga" }, &.{}) catch null) |tool| {
         return tool;
     }
     if (b.findProgram(&.{"tint"}, &.{}) catch null) |tool| {
@@ -100,10 +117,15 @@ fn compileWgsl(b: *std.Build, tool: []const u8, is_tint: bool, name: []const u8)
         const install = b.addInstallFile(out, b.fmt("bin/shader/{s}.spv", .{name}));
         b.getInstallStep().dependOn(&install.step);
     } else {
+        // Modern naga CLI takes positional args: `naga [flags] <input.wgsl> <output.spv>`.
+        // `--keep-coordinate-space` is required: otherwise naga's SPIR-V
+        // backend negates gl_Position.y, which would double-flip our
+        // Vulkan-oriented matrices (Y-flipped perspective, Y-down ortho)
+        // and render everything upside down.
         const cmd = b.addSystemCommand(&.{tool});
-        cmd.addArg("-o");
-        const out = cmd.addOutputFileArg(b.fmt("{s}.spv", .{name}));
+        cmd.addArg("--keep-coordinate-space");
         cmd.addFileArg(b.path(b.fmt("src/shader/{s}.wgsl", .{name})));
+        const out = cmd.addOutputFileArg(b.fmt("{s}.spv", .{name}));
         const install = b.addInstallFile(out, b.fmt("bin/shader/{s}.spv", .{name}));
         b.getInstallStep().dependOn(&install.step);
     }

@@ -2,7 +2,7 @@ struct PushConstants {
     transform: mat4x4<f32>,
 }
 
-var<push_constant> pc: PushConstants;
+var<immediate> pc: PushConstants;
 
 struct VertexInput {
     @location(0) color: vec4<f32>,
